@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: game
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      type: game
+  template:
+    metadata:
+      labels:
+        type: game
+    spec:
+      containers:
+        - name: game
+          image: yashchandane/game:{{ .Values.image.tag }}
+          ports:
+            - containerPort: 80
+              protocol: TCP
