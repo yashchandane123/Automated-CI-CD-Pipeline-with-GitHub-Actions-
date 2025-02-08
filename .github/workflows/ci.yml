@@ -1,55 +1,98 @@
 name: CI
-permissions:
-  contents: write
 
 on:
   push:
     branches:
       - main
-    paths-ignore:
-      - 'helm/**'
-      - Readme.md
+  pull_request:
 
 jobs:
-  push:
+  sonarcloud:
+    name: SonarCloud Scan
     runs-on: ubuntu-latest
     steps:
-      - name: checkout repository
+      - name: Checkout Repository        
+        uses: actions/checkout@v4        
+        with:          
+          fetch-depth: 0  # Required for proper analysis       
+
+      - name: SonarCloud Scan        
+        uses: SonarSource/sonarqube-scan-action@v4        
+        env:          
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}   
+
+  owasp-dependency-check:
+    name: OWASP Dependency-Check
+    runs-on: ubuntu-latest
+    needs: sonarcloud
+    steps:
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup docker build
-        uses: docker/setup-buildx-action@v1
+      - name: Install .NET 6.0 Runtime (Required for Dependency-Check)
+        run: |
+          echo "Installing .NET 6.0 Runtime..."
+          wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+          sudo dpkg -i packages-microsoft-prod.deb
+          sudo apt-get update
+          sudo apt-get install -y dotnet-sdk-6.0 || sudo apt-get install -y dotnet-runtime-6.0
 
-      - name: Login do DockerHub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Download and Extract OWASP Dependency-Check
+        run: |
+          echo "Downloading OWASP Dependency-Check..."
+          curl -sLO https://github.com/jeremylong/DependencyCheck/releases/download/v8.4.0/dependency-check-8.4.0-release.zip
+          unzip -o dependency-check-8.4.0-release.zip -d dependency-check
+          mv dependency-check/dependency-check/* dependency-check/  # Fix path issue
+          echo "Extracted files:"
+          ls -R dependency-check
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      - name: Run OWASP Dependency-Check
+        run: |
+          echo "Running Dependency-Check..."
+          if [ -f "dependency-check/bin/dependency-check.sh" ]; then
+            chmod +x dependency-check/bin/dependency-check.sh  # Ensure execution permissions
+            dependency-check/bin/dependency-check.sh --scan . --format "HTML" --out reports || { echo "Dependency-Check failed!"; exit 1; }
+          else
+            echo "Error: dependency-check.sh script not found!" && exit 1
+          fi
+
+      - name: Upload OWASP Report as Artifact
+        uses: actions/upload-artifact@v4
         with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/game:${{ github.run_id }}
-          platforms: linux/amd64,linux/arm64
+          name: OWASP-Dependency-Check-Report
+          path: reports/
 
   update-helm-chart:
     runs-on: ubuntu-latest
-    needs: push
+    needs: owasp-dependency-check
     steps:
-      - name: checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Ensure full history for conflict resolution
 
-      - name: Update tag
-        run: |
-          sed -i 's/tag: .*/tag: "${{github.run_id}}"/' helm/game-chart/values.yaml
-
-      - name: Commit and push changes
+      - name: Configure Git
         run: |
           git config --global user.email "chandaneyash10@gmail.com"
           git config --global user.name "yashchandane123"
+
+      - name: Pull Latest Changes and Auto-Resolve Conflicts
+        run: |
+          git fetch origin main
+          git checkout main
+          git pull origin main --rebase --autostash || (git rebase --abort && git pull --no-rebase)
+          git merge --strategy-option=ours origin/main  # Keep local changes, avoid conflict
+
+      - name: Update Helm Chart Tag
+        run: |
+          sed -i "s/tag: .*/tag: \"${{ github.run_id }}\"/" helm/game-chart/values.yaml
+
+      - name: Commit and Push Changes
+        run: |
           git add helm/game-chart/values.yaml
-          git commit -m "Update tag in Helm chart"
-          git push
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Update tag in Helm chart"
+            git push origin main || echo "Push failed. You might need to resolve conflicts manually."
+          fi
