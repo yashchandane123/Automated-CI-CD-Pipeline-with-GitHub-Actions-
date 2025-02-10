@@ -39,6 +39,21 @@ jobs:
         run: |
           docker pull ${{ secrets.DOCKERHUB_USERNAME }}/game:${{ github.run_id }}
 
+  sonarcloud:
+      name: SonarCloud Scan
+      runs-on: ubuntu-latest
+      steps:
+      - name: Checkout Repository        
+        uses: actions/checkout@v4    
+        with:          
+          fetch-depth: 0  # Required for proper analysis       
+
+      - name: SonarCloud Scan        
+        uses: SonarSource/sonarqube-scan-action@v4        
+        env:          
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}   
+
+
   owasp-dependency-check:
     name: OWASP Dependency-Check
     runs-on: ubuntu-latest
