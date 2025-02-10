@@ -28,7 +28,7 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/newgame:${{ github.run_id }}
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/game:${{ github.run_id }}
           platforms: linux/amd64,linux/arm64
 
   pull-latest-image:
@@ -37,7 +37,7 @@ jobs:
     steps:
       - name: Pull Latest Docker Image
         run: |
-          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/newgame:${{ github.run_id }}
+          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/game:${{ github.run_id }}
 
   owasp-dependency-check:
     name: OWASP Dependency-Check
