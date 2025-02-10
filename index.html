@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Basic Sokoban HTML Game</title>
+  <title>Basic Helicopter HTML Game</title>
   <meta charset="UTF-8">
   <style>
   html, body {
@@ -10,7 +10,7 @@
   }
 
   body {
-    background: #ded6ae;
+    background: black;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -18,293 +18,217 @@
   </style>
 </head>
 <body>
-<canvas width="400" height="400" id="game"></canvas>
+<canvas width="800" height="550" id="game"></canvas>
 <script>
 const canvas = document.getElementById('game');
 const context = canvas.getContext('2d');
 
-const grid = 64;
+const minTunnelWidth = 400;
+const maxTunnelWidth = canvas.width;
+const minHeight = 10;
+const maxHeight = 100;
 
-// create a new canvas and draw the wall image. then we can use this
-// canvas to draw the images later on
-const wallCanvas = document.createElement('canvas');
-const wallCtx = wallCanvas.getContext('2d');
-wallCanvas.width = wallCanvas.height = grid;
+const obstacleWidth = 65;
+const obstacleHeight = 135;
 
-wallCtx.fillStyle = '#5b5530';
-wallCtx.fillRect(0, 0, grid, grid);
-wallCtx.fillStyle = '#a19555';
+// how fast the background moves
+const moveSpeed = 7;
 
-// 1st row brick
-wallCtx.fillRect(1, 1, grid - 2, 20);
+// downward acceleration
+const gravity = 0.35;
 
-// 2nd row bricks
-wallCtx.fillRect(0, 23, 20, 18);
-wallCtx.fillRect(22, 23, 42, 18);
+// keep track of the spacebar being pressed so we can move the
+// helicopter up when pressed and down when not pressed
+let spacePressed = false;
 
-// 3rd row bricks
-wallCtx.fillRect(0, 43, 42, 20);
-wallCtx.fillRect(44, 43, 20, 20);
+// clamp a number between min and max values
+function clamp(num, min, max) {
+  return Math.min( Math.max(min, num), max);
+}
 
-// the direction to move the player each frame. we'll use change in
-// direction so "row: 1" means move down 1 row, "row: -1" means move
-// up one row, etc.
-let playerDir = { row: 0, col: 0 };
-let playerPos = { row: 0, col: 0 };  // player position in the 2d array
-let rAF = null;  // keep track of the animation frame so we can cancel it
-let width = 0;  // find the largest row and use that as the game width
+// return a random integer between min (inclusive) and max (inclusive)
+// @see https://stackoverflow.com/a/1527820/2124254
+function randInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
 
-// create a mapping of object types using the sok file format
-// @see http://www.sokobano.de/wiki/index.php?title=Level_format
-const types = {
-  wall: '#',
-  player: '@',
-  playerOnGoal: '+',
-  block: '$',
-  blockOnGoal: '*',
-  goal: '.',
-  empty: ' '
+const helicopter = {
+  x: 200,
+  y: 100,
+  width: 100,
+  height: 60,
+  dy: 0,  // velocity
+  ddy: 0  // acceleration
 };
 
-// a sokoban level using the sok file format
-const level1 = `
-  #####
-###   #
-#.@$  #
-### $.#
-#.##$ #
-# # . ##
-#$ *$$.#
-#   .  #
-########
-`;
+// just keep track of a tunnel wall current x position, width, start
+// and end height. the top and bottom wall are mirrored, so we only
+// need to keep track of one of them
+let tunnels = [{
+  x: 0,
+  width: canvas.width,
+  start: 50,
+  end: 50
+},
+{
+  x: canvas.width,
+  width: randInt(minTunnelWidth, maxTunnelWidth),
+  start: 50,
+  end: randInt(minHeight, maxHeight)
+}];
 
-// keep track of what is in every cell of the game using a 2d array
-const cells = [];
+// for the obstacles in the path just need to keep track of the
+// position as they are always the same size
+let obstacles = [{
+  x: canvas.width,
+  y: canvas.height / 2
+},
+{
+  x: canvas.width * 2,
+  y: canvas.height / 2
+}];
 
-// use each line of the level as the row (remove empty lines)
-level1.split('\n')
-  .filter(rowData => !!rowData)
-  .forEach((rowData, row) => {
-    cells[row] = [];
+// tunnel wall color and rgb value
+const wallColor = 'green';
+context.fillStyle = wallColor;
+context.fillRect(0, 0, 1, 1);
 
-    if (rowData.length > width) {
-      width = rowData.length;
-    }
+// getImageData returns a data object which is a flat array of every
+// pixel of the canvas in the specified rect (x, y, width, height).
+// every 4 indices of the array is a single pixel's r,g,b,a values
+const wallData = context.getImageData(0, 0, 1, 1);
 
-    // use each character of the level as the col
-    rowData.split('').forEach((colData, col) => {
-      cells[row][col] = colData;
-
-      if (colData === types.player || colData === types.playerOnGoal) {
-        playerPos = { row, col };
-      }
-    });
-});
-
-// update the size of the canvas to the level size
-canvas.width = width * grid;
-canvas.height = cells.length * grid;
-
-// move an entity from one cell to another
-function move(startPos, endPos) {
-  const startCell = cells[startPos.row][startPos.col];
-  const endCell = cells[endPos.row][endPos.col];
-
-  const isPlayer = startCell === types.player || startCell === types.playerOnGoal;
-
-  // first remove then entity from its current cell
-  switch(startCell) {
-
-    // if the start cell is the player or a block (no goal)
-    // then leave empty
-    case types.player:
-    case types.block:
-      cells[startPos.row][startPos.col] = types.empty;
-      break;
-
-    // if the start cell has a goal then leave a goal
-    case types.playerOnGoal:
-    case types.blockOnGoal:
-      cells[startPos.row][startPos.col] = types.goal;
-      break;
-  }
-
-  // then move then entity into the new cell
-  switch(endCell) {
-
-    // if the end cell is empty, add the block or player
-    case types.empty:
-      cells[endPos.row][endPos.col] = isPlayer ? types.player : types.block;
-      break;
-
-    // if the cell has a goal then make sure to preserve the goal
-    case types.goal:
-      cells[endPos.row][endPos.col] = isPlayer ? types.playerOnGoal : types.blockOnGoal;
-      break;
-  }
-}
-
-// show the win screen
-function showWin() {
-  cancelAnimationFrame(rAF);
-
-  context.fillStyle = 'black';
-  context.globalAlpha = 0.75;
-  context.fillRect(0, canvas.height / 2 - 30, canvas.width, 60);
-
-  context.globalAlpha = 1;
-  context.fillStyle = 'white';
-  context.font = '36px monospace';
-  context.textAlign = 'center';
-  context.textBaseline = 'middle';
-  context.fillText('YOU WIN!', canvas.width / 2, canvas.height / 2);
-}
+// destructure the image data array to get the rgb values of the wall
+// @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Destructuring_assignment
+const [ wallRed, wallGreen, wallBlue ] = wallData.data;
 
 // game loop
+let rAF;
 function loop() {
   rAF = requestAnimationFrame(loop);
   context.clearRect(0,0,canvas.width,canvas.height);
 
-  // check to see if the player can move in the desired direction
-  const row = playerPos.row + playerDir.row;
-  const col = playerPos.col + playerDir.col;
-  const cell = cells[row][col];
-  switch(cell) {
-
-    // allow the player to move into empty or goal cells
-    case types.empty:
-    case types.goal:
-      move(playerPos, { row, col });
-
-      playerPos.row = row;
-      playerPos.col = col;
-      break;
-
-    // don't allow the player to move into a wall cell
-    case types.wall:
-      break;
-
-    // only allow the player to move into a block cell if the cell
-    // after the block is empty or a goal
-    case types.block:
-    case types.blockOnGoal:
-      const nextRow = row + playerDir.row;
-      const nextCol = col + playerDir.col;
-      const nextCell = cells[nextRow][nextCol];
-
-      if (nextCell === types.empty || nextCell === types.goal) {
-        // move the block first, then the player
-        move({ row, col }, { row: nextRow, col: nextCol });
-        move(playerPos, { row, col });
-
-        playerPos.row = row;
-        playerPos.col = col;
-      }
-      break;
+  if (spacePressed) {
+    helicopter.ddy = -0.7;
+  }
+  else {
+    helicopter.ddy = 0;
   }
 
-  // reset player dir after checking move
-  playerDir = { row: 0, col: 0 };
+  // update position based on acceleration and velocity
+  helicopter.dy += helicopter.ddy + gravity;
+  // clamp velocity
+  helicopter.dy = clamp(helicopter.dy, -8, 8);
+  helicopter.y += helicopter.dy;
 
-  // check to see if all blocks are on goals
-  let allBlocksOnGoals = true;
+  // draw the helicopter
+  context.fillStyle = 'white';
+  context.fillRect(helicopter.x, helicopter.y, helicopter.width, helicopter.height);
 
-  // draw the board. because multiple things can be drawn on the same
-  // cell we shouldn't use a switch as that would only allow us to draw
-  // a single thing per cell
-  context.strokeStyle = 'black';
-  context.lineWidth = 2;
-  for (let row = 0; row < cells.length; row++) {
-    for (let col = 0; col < cells[row].length; col++) {
-      const cell = cells[row][col];
+  // draw the tunnel walls over the helicopter
+  context.fillStyle = 'green';
+  tunnels.forEach((tunnel, index) => {
+    tunnel.x -= moveSpeed;
 
-      if (cell === types.wall) {
-        context.drawImage(wallCanvas, col * grid, row * grid);
-      }
-
-      if (cell === types.block || cell === types.blockOnGoal) {
-        if (cell === types.block) {
-          context.fillStyle = '#ffbb5b';
-
-          // block is not on goal
-          allBlocksOnGoals = false;
-        }
-        else {
-          context.fillStyle = '#ba6a15';
-        }
-
-        context.fillRect(col * grid, row * grid, grid, grid);
-        context.strokeRect(col * grid, row * grid, grid, grid);
-        context.strokeRect((col + 0.1) * grid, (row + 0.1) * grid, grid - (0.2 * grid), grid - (0.2 * grid));
-
-        // X
-        context.beginPath();
-        context.moveTo((col + 0.1) * grid, (row + 0.1) * grid);
-        context.lineTo((col + 0.9) * grid, (row + 0.9) * grid);
-        context.moveTo((col + 0.9) * grid, (row + 0.1) * grid);
-        context.lineTo((col + 0.1) * grid, (row + 0.9) * grid);
-        context.stroke();
-      }
-
-      if (cell === types.goal || cell === types.playerOnGoal) {
-        context.fillStyle = '#914430';
-        context.beginPath();
-        context.arc((col + 0.5) * grid, (row + 0.5) * grid, 10, 0, Math.PI * 2);
-        context.fill();
-      }
-
-      if (cell === types.player || cell === types.playerOnGoal) {
-        context.fillStyle = 'black';
-        context.beginPath();
-
-        // head
-        context.arc((col + 0.5) * grid, (row + 0.3) * grid, 8, 0, Math.PI * 2);
-        context.fill();
-        // body
-        context.fillRect((col + 0.48) * grid, (row + 0.3) * grid, 2, grid/ 2.5 );
-        // arms
-        context.fillRect((col + 0.3) * grid, (row + 0.5) * grid, grid / 2.5, 2);
-        // legs
-        context.moveTo((col + 0.5) * grid, (row + 0.7) * grid);
-        context.lineTo((col + 0.65) * grid, (row + 0.9) * grid);
-        context.moveTo((col + 0.5) * grid, (row + 0.7) * grid);
-        context.lineTo((col + 0.35) * grid, (row + 0.9) * grid);
-        context.stroke();
-      }
+    // if the last tunnel is fully on screen, we need to spawn a new
+    // tunnel segment off screen
+    if (
+      index === tunnels.length - 1 &&
+      tunnel.x + tunnel.width <= canvas.width
+    ) {
+      tunnels.push({
+        x: tunnel.x + tunnel.width,
+        width: randInt(minTunnelWidth, maxTunnelWidth),
+        start: tunnel.end,
+        end: randInt(minHeight, maxHeight)
+      });
     }
-  }
 
-  if (allBlocksOnGoals) {
-    showWin();
+    // top tunnel wall
+    context.beginPath();
+    context.moveTo(tunnel.x, 0);
+    context.lineTo(tunnel.x, tunnel.start);
+    context.lineTo(tunnel.x + tunnel.width, tunnel.end);
+    context.lineTo(tunnel.x + tunnel.width, 0);
+    context.closePath();
+    context.fill();
+
+    // bottom tunnel wall
+    context.beginPath();
+    context.moveTo(tunnel.x, canvas.height);
+    context.lineTo(tunnel.x, tunnel.start + 450);
+    context.lineTo(tunnel.x + tunnel.width, tunnel.end + 450);
+    context.lineTo(tunnel.x + tunnel.width, canvas.height);
+    context.closePath();
+    context.fill();
+  });
+
+  // draw obstacles
+  obstacles.forEach((obstacle, index) => {
+    obstacle.x -= moveSpeed;
+    context.fillRect(obstacle.x, obstacle.y, obstacleWidth, obstacleHeight);
+
+    // if the last obstacle is fully on screen, we need to spawn a new
+    // one off screen
+    if (
+      index === obstacles.length - 1 &&
+      obstacle.x + obstacleWidth <= canvas.width
+    ) {
+      obstacles.push({
+        x: canvas.width * 2,
+        y: randInt(maxHeight + 50, canvas.height - obstacleHeight - maxHeight - 50)
+      });
+    }
+  });
+
+  // remove any tunnel segments or obstacles that are off screen
+  tunnels = tunnels.filter(tunnel => tunnel.x + tunnel.width > 0);
+  obstacles = obstacles.filter(obstacle => obstacle.x + obstacleWidth > 0);
+
+  // pixel perfect collision detection
+  // get the pixels of the canvas at the helicopter rect and look for
+  // any pixels that match the wall color. the wall has to be drawn
+  // above the helicopter in order for this to work
+  const { data } = context.getImageData(helicopter.x, helicopter.y, helicopter.width, helicopter.height);
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+
+    // if we match the tunnel wall color we have a collision
+    if (r === wallRed && g === wallGreen && b === wallBlue) {
+      // draw a dotted red circle around the helicopter when it
+      // crashes
+      context.strokeStyle = 'red';
+      context.setLineDash([5, 15])
+      context.lineWidth = 4;
+
+      context.beginPath();
+      context.arc(helicopter.x + helicopter.width / 2, helicopter.y + helicopter.height / 2, helicopter.width, 0, 2 * Math.PI);
+      context.stroke();
+
+      cancelAnimationFrame(rAF);
+    }
   }
 }
 
-// listen to keyboard events to move the player
+// listen to keyboard events to move the helicopter
 document.addEventListener('keydown', function(e) {
-  playerDir = { row: 0, col: 0};
-
-  // left arrow key
-  if (e.which === 37) {
-    playerDir.col = -1;
+  // spacebar
+  if (e.code === 'Space') {
+    spacePressed = true;
   }
-  // up arrow key
-  else if (e.which === 38) {
-    playerDir.row = -1;
-  }
-  // right arrow key
-  else if (e.which === 39) {
-    playerDir.col = 1;
-  }
-  // down arrow key
-  else if (e.which === 40) {
-    playerDir.row = 1;
+});
+document.addEventListener('keyup', function(e) {
+  // spacebar
+  if (e.code === 'Space') {
+    spacePressed = false;
   }
 });
 
 // start the game
-requestAnimationFrame(loop);
+rAF = requestAnimationFrame(loop);
 </script>
 </body>
 </html>
-
