@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD Pipeline
 
 on:
   push:
@@ -7,24 +7,9 @@ on:
   pull_request:
 
 jobs:
-  # sonarcloud:
-  #   name: SonarCloud Scan
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Checkout Repository        
-  #       uses: actions/checkout@v4    
-  #       with:          
-  #         fetch-depth: 0  # Required for proper analysis       
-
-  #     - name: SonarCloud Scan        
-  #       uses: SonarSource/sonarqube-scan-action@v4        
-  #       env:          
-  #         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}   
-
   owasp-dependency-check:
     name: OWASP Dependency-Check
     runs-on: ubuntu-latest
-    # needs: sonarcloud  # Removed dependency on SonarCloud
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -43,18 +28,11 @@ jobs:
           curl -sLO https://github.com/jeremylong/DependencyCheck/releases/download/v8.4.0/dependency-check-8.4.0-release.zip
           unzip -o dependency-check-8.4.0-release.zip -d dependency-check
           mv dependency-check/dependency-check/* dependency-check/  # Fix path issue
-          echo "Extracted files:"
-          ls -R dependency-check
 
       - name: Run OWASP Dependency-Check
         run: |
-          echo "Running Dependency-Check..."
-          if [ -f "dependency-check/bin/dependency-check.sh" ]; then
-            chmod +x dependency-check/bin/dependency-check.sh  # Ensure execution permissions
-            dependency-check/bin/dependency-check.sh --scan . --format "HTML" --out reports || { echo "Dependency-Check failed!"; exit 1; }
-          else
-            echo "Error: dependency-check.sh script not found!" && exit 1
-          fi
+          chmod +x dependency-check/bin/dependency-check.sh
+          dependency-check/bin/dependency-check.sh --scan . --format "HTML" --out reports || { echo "Dependency-Check failed!"; exit 1; }
 
       - name: Upload OWASP Report as Artifact
         uses: actions/upload-artifact@v4
@@ -80,15 +58,11 @@ jobs:
 
       - name: Generate SBOM using Syft
         run: |
-          syft . -o cyclonedx-xml > sbom.xml  # Use CycloneDX XML format
+          syft . -o cyclonedx-xml > sbom.xml
 
       - name: Run Trivy FS Scan (Source Code Vulnerabilities)
         run: |
           trivy fs --exit-code 1 --severity HIGH,CRITICAL --format table . > trivy-fs-results.txt
-
-      - name: Run Trivy Image Scan (Container Image Vulnerabilities)
-        run: |
-          trivy image --exit-code 1 --severity HIGH,CRITICAL --format table -o trivy-image-results.txt ${{ secrets.DOCKERHUB_USERNAME }}/application-game:${{ github.run_id }} || true
 
       - name: Upload Trivy FS Scan Results
         uses: actions/upload-artifact@v4
@@ -96,21 +70,47 @@ jobs:
           name: trivy-fs-results
           path: trivy-fs-results.txt
 
-      - name: Upload Trivy Image Scan Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-image-results
-          path: trivy-image-results.txt
-
       - name: Upload Trivy SBOM Scan Results
         uses: actions/upload-artifact@v4
         with:
           name: trivy-sbom-results
           path: sbom.xml
 
-  update-helm-chart:
+  build-and-push-docker:
+    name: Build and Push Docker Image
     runs-on: ubuntu-latest
     needs: trivy-security-scan
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        run: echo "${{ secrets.DOCKERHUB_PASSWORD }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+      - name: Build Docker Image
+        run: |
+          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/application-game:${{ github.run_id }} .
+          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/application-game:${{ github.run_id }} ${{ secrets.DOCKERHUB_USERNAME }}/application-game:latest
+
+      - name: Push Docker Image
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/application-game:${{ github.run_id }}
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/application-game:latest
+
+      - name: Run Trivy Image Scan (Container Image Vulnerabilities)
+        run: |
+          trivy image --exit-code 1 --severity HIGH,CRITICAL --format table -o trivy-image-results.txt ${{ secrets.DOCKERHUB_USERNAME }}/application-game:${{ github.run_id }} || true
+
+      - name: Upload Trivy Image Scan Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-results
+          path: trivy-image-results.txt
+
+  update-helm-chart:
+    name: Update Helm Chart
+    runs-on: ubuntu-latest
+    needs: build-and-push-docker
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -127,7 +127,7 @@ jobs:
           git fetch origin main
           git checkout main
           git pull origin main --rebase --autostash || (git rebase --abort && git pull --no-rebase)
-          git merge --strategy-option=ours origin/main  # Keep local changes, avoid conflict
+          git merge --strategy-option=ours origin/main
 
       - name: Update Helm Chart Tag
         run: |
@@ -139,6 +139,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Update tag in Helm chart"
+            git commit -m "Update tag in Helm chart to ${{ github.run_id }}"
             git push origin main || echo "Push failed. You might need to resolve conflicts manually."
-          fi
+          fi 
