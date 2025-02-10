@@ -62,17 +62,27 @@ jobs:
           fi
 
   owasp-dependency-check:
-    name: OWASP Dependency-Check
-    runs-on: ubuntu-latest
-    steps:
+      name: OWASP Dependency-Check
+      runs-on: ubuntu-latest
+      steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Run OWASP Dependency-Check
+      - name: Install .NET 6.0 Runtime
+        run: |
+          wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+          sudo dpkg -i packages-microsoft-prod.deb
+          sudo apt-get update
+          sudo apt-get install -y dotnet-sdk-6.0 || sudo apt-get install -y dotnet-runtime-6.0
+
+      - name: Download and Extract OWASP Dependency-Check
         run: |
           curl -sLO https://github.com/jeremylong/DependencyCheck/releases/download/v8.4.0/dependency-check-8.4.0-release.zip
           unzip -o dependency-check-8.4.0-release.zip -d dependency-check
           mv dependency-check/dependency-check/* dependency-check/
+
+      - name: Run OWASP Dependency-Check
+        run: |
           chmod +x dependency-check/bin/dependency-check.sh
           dependency-check/bin/dependency-check.sh --scan . --format "HTML" --out reports || exit 1
 
